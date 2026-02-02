@@ -1,0 +1,231 @@
+import streamlit as st
+import pandas as pd
+import plotly.graph_objects as go
+import plotly.express as px
+from prophet import Prophet
+
+theme = st.sidebar.radio(
+    "🎨 Theme",
+    ["Light Mode", "Dark Mode"],
+    index=1
+)
+
+if theme == "Dark Mode":
+    st.markdown("""
+    <style>
+    .stApp { background-color: #0e1117; color: #ffffff; }
+    section[data-testid="stSidebar"] { background-color: #161b22; color: #ffffff; }
+    h1, h2, h3, h4 { color: #ffffff !important; }
+    p, div, span, label { color: #e6e6e6 !important; }
+    div[data-testid="metric-container"] { background-color: #1f2933; border-radius: 10px; padding: 10px; }
+    </style>
+    """, unsafe_allow_html=True)
+else:
+    st.markdown("""
+    <style>
+    .stApp { background-color: #ffffff; color: #000000; }
+    section[data-testid="stSidebar"] { background-color: #f4f6f8; color: #000000; }
+    h1, h2, h3, h4 { color: #000000 !important; }
+    p, div, span, label { color: #111111 !important; }
+    div[data-testid="metric-container"] { background-color: #f0f2f6; border-radius: 10px; padding: 10px; }
+    </style>
+    """, unsafe_allow_html=True)
+# ─── Page Config ───
+st.set_page_config(
+    page_title="Safe Walk • Crime Analysis",
+    page_icon="🚶‍♂️",
+    layout="wide"
+)
+
+st.title("🚶‍♂️ Safe Walk – Crime Analysis & Safety Insights")
+
+# ─── Load Data ───
+@st.cache_data
+def load_data():
+    path = "/Users/akumaresan/Downloads/archive/crimes.csv"  # CHANGE if needed
+    df = pd.read_csv(path, low_memory=False)
+    df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
+    df = df.dropna(subset=['Date'])
+    df['Year'] = df['Date'].dt.year
+    df['Month'] = df['Date'].dt.to_period('M')
+    df['DayOfWeek'] = df['Date'].dt.day_name()
+    df['Hour'] = df['Date'].dt.hour
+    return df
+
+df = load_data()
+
+# ─── Sidebar Filters ───
+with st.sidebar:
+    st.header("🔍 Filters")
+
+    year_range = st.slider(
+        "Year Range",
+        int(df['Year'].min()),
+        int(df['Year'].max()),
+        (df['Year'].max() - 10, df['Year'].max())
+    )
+
+    crime_types = sorted(df['Primary Type'].dropna().unique())
+    selected_types = st.multiselect(
+        "Crime Types",
+        crime_types,
+        default=crime_types[:5]
+    )
+
+    hour_range = st.slider("Hour of Day", 0, 23, (6, 22))
+
+filtered = df[
+    (df['Year'] >= year_range[0]) &
+    (df['Year'] <= year_range[1]) &
+    (df['Hour'] >= hour_range[0]) &
+    (df['Hour'] <= hour_range[1])
+]
+
+if selected_types:
+    filtered = filtered[filtered['Primary Type'].isin(selected_types)]
+
+# ─── Metrics ───
+st.subheader("📊 Overview")
+col1, col2, col3, col4 = st.columns(4)
+
+col1.metric("Total Crimes", f"{len(filtered):,}")
+col2.metric("Years", f"{year_range[0]}–{year_range[1]}")
+col3.metric("Top Crime", filtered['Primary Type'].mode()[0] if not filtered.empty else "N/A")
+col4.metric("Common Day", filtered['DayOfWeek'].mode()[0] if not filtered.empty else "N/A")
+
+# ─── Tabs ───
+tab_trends, tab_map, tab_forecast = st.tabs(
+    ["📈 Trends", "🗺️ Map & Safety Time", "🔮 Forecast"]
+)
+
+# ───────────────────────── TRENDS TAB ─────────────────────────
+with tab_trends:
+    st.subheader("Crime Trends Over Time")
+
+    yearly = filtered.groupby('Year').size().reset_index(name='Crimes')
+
+    fig_year = go.Figure()
+    fig_year.add_trace(go.Scatter(
+        x=yearly['Year'],
+        y=yearly['Crimes'],
+        mode='lines+markers',
+        marker=dict(size=10),
+        line=dict(width=3)
+    ))
+
+    fig_year.update_layout(
+        xaxis_title="Year",
+        yaxis_title="Number of Crimes",
+        hovermode="x unified"
+    )
+
+    st.plotly_chart(fig_year, use_container_width=True)
+
+    st.subheader("Crimes by Day & Hour")
+
+    heat = filtered.groupby(
+        ['DayOfWeek', 'Hour']
+    ).size().unstack(fill_value=0)
+
+    fig_heat = go.Figure(data=go.Heatmap(
+        z=heat.values,
+        x=heat.columns,
+        y=heat.index,
+        colorscale="Blues"
+    ))
+    fig_heat.update_layout(
+    title="Crimes by Day and Hour",
+    xaxis_title="Hour",
+    yaxis_title="Day of Week"
+    )
+
+    st.plotly_chart(fig_heat, use_container_width=True)
+
+# ───────────────────────── MAP TAB ─────────────────────────
+with tab_map:
+    st.subheader("🕒 Best Time to Walk")
+
+    hourly = filtered.groupby('Hour').size().reset_index(name='Crimes')
+
+    safest = hourly.nsmallest(3, 'Crimes')
+    riskiest = hourly.nlargest(3, 'Crimes')
+
+    c1, c2 = st.columns(2)
+
+    with c1:
+        st.success("✅ Safest Hours")
+        for _, r in safest.iterrows():
+            st.write(f"{int(r['Hour']):02d}:00 – {int(r['Hour']+1):02d}:00")
+
+    with c2:
+        st.error("⚠️ High-Risk Hours")
+        for _, r in riskiest.iterrows():
+            st.write(f"{int(r['Hour']):02d}:00 – {int(r['Hour']+1):02d}:00")
+    st.divider()
+
+    st.subheader("Crime Locations (Zoom & Pan Enabled)")
+
+    map_data = filtered.dropna(subset=['Latitude', 'Longitude'])
+
+    if not map_data.empty:
+        fig_map = px.scatter_map(
+            map_data.sample(min(8000, len(map_data))),
+            lat="Latitude",
+            lon="Longitude",
+            color="Primary Type",
+            zoom=10,
+            opacity=0.6,
+            height=600
+        )
+
+        fig_map.update_layout(
+            mapbox_style="open-street-map",
+            margin={"r":0,"t":0,"l":0,"b":0}
+        )
+
+        st.plotly_chart(fig_map, use_container_width=True)
+    else:
+        st.warning("No location data available")
+
+# ───────────────────────── FORECAST TAB ─────────────────────────with tab_forecast:
+
+with tab_forecast:
+
+    st.subheader("Crime Forecast (Prophet)")
+
+    monthly = filtered.groupby('Month').size().reset_index(name='y')
+    monthly['ds'] = monthly['Month'].dt.to_timestamp()
+    monthly = monthly[['ds', 'y']]
+
+    if len(monthly) > 12:
+        model = Prophet(yearly_seasonality=True)
+        model.fit(monthly)
+
+        future = model.make_future_dataframe(periods=36, freq='M')
+        forecast = model.predict(future)
+
+        fig_fc = go.Figure()
+        fig_fc.add_trace(go.Scatter(
+            x=forecast['ds'],
+            y=forecast['yhat'],
+            name="Forecast"
+        ))
+        fig_fc.add_trace(go.Scatter(
+            x=monthly['ds'],
+            y=monthly['y'],
+            mode="markers",
+            name="Actual"
+        ))
+
+        fig_fc.update_layout(
+            xaxis_title="Date",
+            yaxis_title="Crimes"
+        )
+
+        st.plotly_chart(fig_fc, use_container_width=True)
+
+        st.info("Forecast helps plan long-term safety interventions")
+    else:
+        st.warning("Not enough data for forecasting")
+
+st.caption("📊 Data: Chicago Crime Dataset • Purpose: Pedestrian Safety Decision Support")
